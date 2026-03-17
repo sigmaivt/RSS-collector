@@ -1,0 +1,21 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+  rsshub:
+    image: diygod/rsshub
+    restart: unless-stopped
+    ports:
+      - "1200:1200"
+    environment:
+      - CACHE_TYPE=redis
+      - REDIS_URL=redis://redis:6379/
+      - GITHUB_ACCESS_TOKEN=${GITHUB_ACCESS_TOKEN}
+    depends_on:
+      - redis
+
+volumes:
+  redis_data:

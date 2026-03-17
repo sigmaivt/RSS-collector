@@ -1,0 +1,34 @@
+# RSS → LLM → Telegram Pipeline
+# Python 3.11+
+
+# HTTP client
+httpx[http2]>=0.27
+
+# RSS parsing
+feedparser>=6.0
+
+# HTML processing
+selectolax>=0.3
+readability-lxml>=0.8
+beautifulsoup4>=4.12
+
+# Database
+sqlmodel>=0.0.22
+aiosqlite>=0.20
+
+# Scheduling
+apscheduler>=3.10
+
+# Configuration
+pydantic-settings>=2.5
+pyyaml>=6.0
+
+# Retry logic
+tenacity>=9.0
+
+# Logging
+structlog>=24.0
+
+# Dev/test
+pytest>=8.0
+pytest-asyncio>=0.24

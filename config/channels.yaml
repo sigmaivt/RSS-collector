@@ -1,0 +1,155 @@
+channels:
+  # ══════════════════════════════════════════════
+  # Channel 1: AI Coding Tools
+  # ══════════════════════════════════════════════
+  - id: ai_coding
+    name: "AI Coding Tools"
+    description: "AI-ассистенты для кодинга: Claude Code, Cursor, Copilot, Windsurf, Cline, Aider, MCP"
+    classifier_prompt_file: classifier_ai_coding.txt
+    summarizer_prompt_file: summarizer_ru.txt
+    telegram_chat_id: "${TG_CHAT_AI_CODING}"
+    schedule_minutes: 30
+    enabled: true
+    sources:
+      # RSSHub routes
+      - id: techcrunch_rsshub
+        type: rsshub
+        url: "http://localhost:1200/techcrunch/news"
+        name: "TechCrunch (RSSHub)"
+      - id: theverge_rsshub
+        type: rsshub
+        url: "http://localhost:1200/theverge"
+        name: "The Verge (RSSHub)"
+      - id: hackernews_rsshub
+        type: rsshub
+        url: "http://localhost:1200/hackernews"
+        name: "Hacker News (RSSHub)"
+      - id: github_trending
+        type: rsshub
+        url: "http://localhost:1200/github/trending/daily/any/en"
+        name: "GitHub Trending (RSSHub)"
+        note: "Требует GITHUB_ACCESS_TOKEN"
+      - id: wired_ai_rsshub
+        type: rsshub
+        url: "http://localhost:1200/wired/tag/ai"
+        name: "Wired AI (RSSHub)"
+      - id: hf_daily_papers
+        type: rsshub
+        url: "http://localhost:1200/huggingface/daily-papers"
+        name: "HF Daily Papers (RSSHub)"
+      - id: arstechnica_direct
+        type: direct
+        url: "https://feeds.arstechnica.com/arstechnica/index"
+        name: "Ars Technica"
+      # Direct RSS feeds (from extract-data JSON)
+      - id: infoq_ai
+        type: direct
+        url: "https://feed.infoq.com/ai/articles/"
+        name: "InfoQ AI Articles"
+        language: en
+      - id: techcrunch_ai_direct
+        type: direct
+        url: "https://techcrunch.com/category/artificial-intelligence/feed/"
+        name: "TechCrunch AI (direct)"
+        language: en
+      - id: opennet_ru
+        type: direct
+        url: "https://www.opennet.ru/opennews/opennews_all_utf.rss"
+        name: "OpenNet.ru News"
+        language: ru
+      - id: habr_ai
+        type: direct
+        url: "https://habr.com/ru/rss/hubs/artificial_intelligence/all/"
+        name: "Habr Artificial Intelligence"
+        language: ru
+      - id: theregister_ai
+        type: direct
+        url: "https://www.theregister.com/ai/headlines.rss"
+        name: "The Register AI"
+        language: en
+
+  # ══════════════════════════════════════════════
+  # Channel 2: AI Models & Research
+  # ══════════════════════════════════════════════
+  - id: ai_models
+    name: "AI Models & Research"
+    description: "Новые модели, бенчмарки, fine-tuning, исследования ML/AI"
+    classifier_prompt_file: classifier_ai_models.txt
+    summarizer_prompt_file: summarizer_ru.txt
+    telegram_chat_id: "${TG_CHAT_AI_MODELS}"
+    schedule_minutes: 60
+    enabled: true
+    sources:
+      # RSSHub routes
+      - id: hf_daily_papers
+        type: rsshub
+        url: "http://localhost:1200/huggingface/daily-papers"
+        name: "HF Daily Papers (RSSHub)"
+      - id: hackernews_rsshub
+        type: rsshub
+        url: "http://localhost:1200/hackernews"
+        name: "Hacker News (RSSHub)"
+      # Direct RSS feeds
+      - id: google_research
+        type: direct
+        url: "https://research.google/blog/rss/"
+        name: "Google Research Blog"
+        language: en
+      - id: openai_news
+        type: direct
+        url: "https://openai.com/news/rss.xml"
+        name: "OpenAI News"
+        language: en
+      - id: venturebeat_ai
+        type: direct
+        url: "https://venturebeat.com/category/ai/feed/"
+        name: "VentureBeat AI"
+        language: en
+      - id: hf_blog_direct
+        type: direct
+        url: "https://huggingface.co/blog/feed.xml"
+        name: "Hugging Face Blog"
+        language: en
+      - id: habr_ml
+        type: direct
+        url: "https://habr.com/ru/rss/hubs/machine_learning/all/"
+        name: "Habr Machine Learning"
+        language: ru
+
+  # ══════════════════════════════════════════════
+  # Channel 3: ERP/MES Systems
+  # ══════════════════════════════════════════════
+  - id: erp_mes
+    name: "ERP/MES Systems"
+    description: "ERP, MES, автоматизация производства, цифровизация"
+    classifier_prompt_file: classifier_erp_mes.txt
+    summarizer_prompt_file: summarizer_ru.txt
+    telegram_chat_id: "${TG_CHAT_ERP_MES}"
+    schedule_minutes: 60
+    enabled: true
+    sources:
+      - id: erp_software_blog
+        type: direct
+        url: "https://www.erpsoftwareblog.com/feed/"
+        name: "ERP Software Blog"
+        language: en
+      - id: automation_com
+        type: direct
+        url: "https://www.automation.com/en-us/rss-feeds/rss-feed-automation-com-news/"
+        name: "Automation.com News"
+        language: en
+      - id: automation_world
+        type: direct
+        url: "https://www.automationworld.com/rss/all"
+        name: "Automation World"
+        language: en
+      - id: tadviser_erp
+        type: direct
+        url: "https://www.tadviser.ru/xml/tadviser.xml"
+        name: "TAdviser ERP News"
+        language: ru
+      - id: cnews_erp
+        type: direct
+        url: "https://www.cnews.ru/inc/rss/news.xml"
+        name: "CNews ERP News"
+        language: ru
