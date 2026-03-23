@@ -44,6 +44,18 @@ class Summarizer:
             # Strip <think>...</think> blocks (Qwen3 thinking mode)
             import re
             content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            
+            # Remove duplicate paragraphs to prevent Telegram 400 errors
+            lines = content.split('\n')
+            seen = set()
+            unique_lines = []
+            for line in lines:
+                line_stripped = line.strip()
+                if line_stripped not in seen:
+                    unique_lines.append(line)
+                    seen.add(line_stripped)
+            content = '\n'.join(unique_lines).strip()
+            
             return content
 
     async def summarize_job(self, job: ChannelJob, channel: ChannelConfig) -> ChannelJob:

@@ -18,7 +18,12 @@ NOT VALID (reject these):
 - General business software (CRM, HR, marketing tools)
 - Consumer IoT (smart home, wearables)
 - Cybersecurity (unless specifically for OT/ICS)
+- Operating systems updates (Alt Linux, Windows Server, etc.) without ERP/MES context
+- Middleware updates (Java, .NET, Tomcat, databases) without manufacturing application
+- Software certification (FSTEC, FSB) without connection to production systems
+- Import substitution in general sense (must be about manufacturing systems)
+- Enterprise infrastructure (servers, storage, networks) without ERP/MES application
 
-CRITICAL: The text must be about enterprise systems for manufacturing/production OR industrial automation. General IT = NOT. General AI = NOT.
+CRITICAL: The text must be about enterprise systems for manufacturing/production OR industrial automation. General IT = NOT. General AI = NOT. OS updates = NOT. Middleware = NOT. Certification = NOT.
 
 Analyze the text, then respond with exactly one word: VALID or NOT

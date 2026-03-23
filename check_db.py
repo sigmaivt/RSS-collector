@@ -4,7 +4,7 @@ import os
 
 sys.path.insert(0, 'src')
 
-DB_PATH = './src/data/pipeline.db'
+DB_PATH = './data/pipeline.db'
 
 if not os.path.exists(DB_PATH):
     print(f"DB not found at {DB_PATH}")

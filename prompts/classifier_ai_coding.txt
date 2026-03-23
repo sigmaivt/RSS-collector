@@ -13,7 +13,13 @@ NOT VALID (reject these):
 - General AI news (new model releases, company announcements)
 - DevOps, CI/CD, testing (unless AI-assisted)
 - Programming tutorials without AI tools
+- Consumer electronics (smartphones, tablets, laptops, foldable devices)
+- Hardware releases and reviews (new devices, product launches, sales data)
+- Mobile technology and apps (unless AI coding assistants for mobile)
+- Tech company business news (sales figures, market share, product discontinuations)
+- General technology news without AI coding context
+- Consumer tech, gadgets, wearables, smart home devices
 
-CRITICAL: The text must explicitly mention using AI to write/generate/assist with code. General dev topics = NOT. General AI topics = NOT.
+CRITICAL: The text must explicitly mention using AI to write/generate/assist with code. General dev topics = NOT. General AI topics = NOT. Consumer electronics = NOT. Hardware news = NOT. Business news = NOT.
 
 Analyze the text, then respond with exactly one word: VALID or NOT
