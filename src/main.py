@@ -66,7 +66,6 @@ async def main() -> None:
     structlog.configure(
         processors=[
             structlog.stdlib.add_log_level,
-            structlog.stdlib.add_logger_name,
             structlog.dev.ConsoleRenderer(),
         ]
     )
@@ -94,6 +93,15 @@ async def main() -> None:
         trigger=IntervalTrigger(minutes=settings.poll_interval_minutes),
         args=[enabled, classifier, summarizer, sender, settings],
         id="pipeline",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Outbox flush — runs independently so slow summarization doesn't block sends
+    scheduler.add_job(
+        sender.flush_outbox,
+        trigger=IntervalTrigger(minutes=2),
+        id="flush_outbox",
         max_instances=1,
         coalesce=True,
     )

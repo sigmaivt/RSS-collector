@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(unzip -l rss-llm-filter-project.zip)",
+      "Bash(unzip -o rss-llm-filter-project.zip -d /tmp/rss-project)",
+      "Bash(mkdir -p \"C:/temp/rss-project\")",
+      "Bash(unzip -o rss-llm-filter-project.zip -d \"C:/temp/rss-project\")",
+      "Bash(gh auth:*)",
+      "Bash(gh repo:*)",
+      "Bash(python -c \":*)",
+      "Bash(..venvScriptspython.exe -c \":*)",
+      "Bash(cmd /c \"cd /d C:\\\\Users\\\\Oksana\\\\Desktop\\\\Максим\\\\Обучение\\\\ИИ\\\\_Repository\\\\RSS-collector\\\\.claude\\\\worktrees\\\\crazy-wilson && .venv\\\\Scripts\\\\python.exe -c \"\"import asyncio, sys; sys.path.insert\\(0, ''src''\\); import db; asyncio.run\\(db.init_db\\(\\)\\) \"\" 2>&1\")",
+      "Bash(cmd /c \"cd /d \"\"C:\\\\Users\\\\Oksana\\\\Desktop\\\\Максим\\\\Обучение\\\\ИИ\\\\_Repository\\\\RSS-collector\\\\.claude\\\\worktrees\\\\crazy-wilson\"\" && .venv\\\\Scripts\\\\python.exe src\\\\db.py 2>&1\")",
+      "Bash(cmd /c \"dir \"\"C:\\\\Users\\\\Oksana\\\\Desktop\\\\Максим\\\\Обучение\\\\ИИ\\\\_Repository\\\\RSS-collector\\\\.claude\\\\worktrees\\\\crazy-wilson\\\\data\"\" 2>&1\")",
+      "Bash(powershell -Command \":*)",
+      "Bash(powershell -NoProfile -Command \":*)",
+      "Bash(powershell -NoProfile:*)",
+      "Bash(sqlite3 \"C:/Users/Oksana/Desktop/Максим/Обучение/ИИ/_Repository/RSS-collector/.claude/worktrees/crazy-wilson/src/data/pipeline.db\" \"SELECT ''pending:'', COUNT\\(*\\) FROM telegram_outbox WHERE sent=0; SELECT ''sent:'', COUNT\\(*\\) FROM telegram_outbox WHERE sent=1; SELECT state, COUNT\\(*\\) FROM channel_jobs GROUP BY state;\")",
+      "Bash(PYEXE=\"/c/Users/Oksana/Desktop/Максим/Обучение/ИИ/_Repository/RSS-collector/.claude/worktrees/crazy-wilson/.venv/Scripts/python.exe\")",
+      "Bash(DB=\"/c/Users/Oksana/Desktop/Максим/Обучение/ИИ/_Repository/RSS-collector/.claude/worktrees/crazy-wilson/src/data/pipeline.db\")",
+      "Bash(__NEW_LINE_651913f2983f02ab__ \"$PYEXE\":*)",
+      "Bash(DB=\"C:/Users/Oksana/Desktop/Максим/Обучение/ИИ/_Repository/RSS-collector/.claude/worktrees/crazy-wilson/src/data/pipeline.db\")",
+      "Bash(__NEW_LINE_335f94d50c731438__ \"$PYEXE\" -c \":*)",
+      "Bash(\"$PYEXE\" --version)",
+      "Bash(\"$PYEXE\" \"C:/Temp/check_db.py\")",
+      "Bash(tasklist)",
+      "Bash(\"$PYEXE\" \"C:/Temp/flush_test.py\")",
+      "Bash(\"$PYEXE\" \"C:/Temp/flush_all.py\")",
+      "Bash(\"$PYEXE\" \"C:/Temp/reset_summaries.py\")",
+      "Bash(\"$PYEXE\" -c \":*)",
+      "Bash(\"$PYEXE\" \"C:/Temp/flush_active.py\")",
+      "Bash(\"$PYEXE\" \"C:/Temp/test_llm.py\")",
+      "Bash(\"$PYEXE\" \"C:/Temp/reset_old_outbox.py\")"
+    ]
+  }
+}

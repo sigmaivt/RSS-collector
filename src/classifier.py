@@ -28,17 +28,21 @@ class Classifier:
         payload = {
             "model": self._settings.lm_studio_model,
             "messages": [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": "/no_think\n" + system_prompt},
                 {"role": "user", "content": text},
             ],
             "temperature": self._settings.classifier_temperature,
-            "max_tokens": self._settings.classifier_max_tokens,
+            "max_tokens": 50,
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            return data["choices"][0]["message"]["content"].strip().upper()
+            content = data["choices"][0]["message"]["content"].strip().upper()
+            if "VALID" in content and "NOT VALID" not in content:
+                return "VALID"
+            return "NOT"
 
     async def classify_job(self, job: ChannelJob, channel: ChannelConfig) -> ChannelJob:
         item = await db.get_item(job.item_id)

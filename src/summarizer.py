@@ -30,15 +30,21 @@ class Summarizer:
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text},
+                # Pre-fill empty think block → model skips reasoning, writes answer directly
+                {"role": "assistant", "content": "<think>\n\n</think>\n\n"},
             ],
             "temperature": self._settings.summarizer_temperature,
             "max_tokens": self._settings.summarizer_max_tokens,
         }
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=300) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            return data["choices"][0]["message"]["content"].strip()
+            content = data["choices"][0]["message"]["content"]
+            # Strip <think>...</think> blocks (Qwen3 thinking mode)
+            import re
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            return content
 
     async def summarize_job(self, job: ChannelJob, channel: ChannelConfig) -> ChannelJob:
         item = await db.get_item(job.item_id)

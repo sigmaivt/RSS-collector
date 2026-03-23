@@ -46,13 +46,16 @@ class HealthMonitor:
             return False
 
     async def check_telegram(self) -> bool:
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                url = f"https://api.telegram.org/bot{self._s.tg_bot_token}/getMe"
-                resp = await client.get(url)
-                return resp.status_code == 200
-        except Exception:
-            return False
+        url = f"https://api.telegram.org/bot{self._s.tg_bot_token}/getMe"
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    resp = await client.get(url)
+                    return resp.status_code == 200
+            except Exception:
+                if attempt == 2:
+                    return False
+        return False
 
     def check_disk(self, min_gb: float = 1.0) -> bool:
         usage = shutil.disk_usage(Path(self._s.db_path).parent)

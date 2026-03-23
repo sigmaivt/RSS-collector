@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import aiosqlite
 
@@ -21,20 +22,20 @@ def set_db_path(path: str) -> None:
     _DB_PATH = path
 
 
-async def get_conn() -> aiosqlite.Connection:
+@asynccontextmanager
+async def get_conn() -> AsyncIterator[aiosqlite.Connection]:
     Path(_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    conn = await aiosqlite.connect(_DB_PATH)
-    conn.row_factory = aiosqlite.Row
-    await conn.execute("PRAGMA journal_mode=WAL")
-    await conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    async with aiosqlite.connect(_DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA journal_mode=WAL")
+        await conn.execute("PRAGMA foreign_keys=ON")
+        yield conn
 
 
 async def init_db(schema_path: str | None = None) -> None:
     if schema_path is None:
         schema_path = str(Path(__file__).parent / "schema.sql")
-    conn = await get_conn()
-    async with conn:
+    async with get_conn() as conn:
         with open(schema_path, encoding="utf-8") as f:
             await conn.executescript(f.read())
         await conn.commit()
@@ -48,8 +49,7 @@ def make_item_id(source_id: str, guid: str) -> str:
 
 async def upsert_item(item: RssItem) -> bool:
     """Insert item; return True if new, False if already existed."""
-    conn = await get_conn()
-    async with conn:
+    async with get_conn() as conn:
         cursor = await conn.execute(
             """INSERT OR IGNORE INTO items
                (item_id, source_id, guid, link, title, raw_content, clean_text, published, fetched_at)
@@ -71,8 +71,7 @@ async def upsert_item(item: RssItem) -> bool:
 
 
 async def get_item(item_id: str) -> Optional[RssItem]:
-    conn = await get_conn()
-    async with conn:
+    async with get_conn() as conn:
         async with conn.execute(
             "SELECT * FROM items WHERE item_id = ?", (item_id,)
         ) as cur:
@@ -86,8 +85,7 @@ async def get_item(item_id: str) -> Optional[RssItem]:
 
 async def create_job(item_id: str, channel_id: str) -> bool:
     """Create NEW job; return True if created, False if already exists."""
-    conn = await get_conn()
-    async with conn:
+    async with get_conn() as conn:
         cursor = await conn.execute(
             """INSERT OR IGNORE INTO channel_jobs (item_id, channel_id, state, created_at, updated_at)
                VALUES (?, ?, 'NEW', ?, ?)""",
@@ -104,8 +102,7 @@ async def acquire_jobs(
     lease_minutes: int,
 ) -> list[ChannelJob]:
     """Fetch and lease jobs for processing (atomic lease pattern)."""
-    conn = await get_conn()
-    async with conn:
+    async with get_conn() as conn:
         stale_threshold = (
             datetime.utcnow() - timedelta(minutes=lease_minutes)
         ).isoformat()
@@ -133,8 +130,7 @@ async def acquire_jobs(
 
 
 async def update_job(job: ChannelJob) -> None:
-    conn = await get_conn()
-    async with conn:
+    async with get_conn() as conn:
         await conn.execute(
             """UPDATE channel_jobs
                SET state=?, classifier_result=?, summary=?, attempts=?,
@@ -155,8 +151,7 @@ async def update_job(job: ChannelJob) -> None:
 
 
 async def move_to_dead_letter(job: ChannelJob, error: str) -> None:
-    conn = await get_conn()
-    async with conn:
+    async with get_conn() as conn:
         await conn.execute(
             """INSERT INTO dead_letter_jobs
                (item_id, channel_id, original_state, error, attempts, moved_at)
@@ -177,8 +172,7 @@ async def move_to_dead_letter(job: ChannelJob, error: str) -> None:
 # ── telegram_outbox ────────────────────────────────────────────────────────
 
 async def enqueue_outbox(entry: TelegramOutboxEntry) -> bool:
-    conn = await get_conn()
-    async with conn:
+    async with get_conn() as conn:
         cursor = await conn.execute(
             """INSERT OR IGNORE INTO telegram_outbox
                (item_id, channel_id, chat_id, message_text, created_at)
@@ -196,8 +190,7 @@ async def enqueue_outbox(entry: TelegramOutboxEntry) -> bool:
 
 
 async def get_pending_outbox(limit: int = 20) -> list[TelegramOutboxEntry]:
-    conn = await get_conn()
-    async with conn:
+    async with get_conn() as conn:
         async with conn.execute(
             "SELECT * FROM telegram_outbox WHERE sent = 0 ORDER BY created_at LIMIT ?",
             (limit,),
@@ -207,8 +200,7 @@ async def get_pending_outbox(limit: int = 20) -> list[TelegramOutboxEntry]:
 
 
 async def mark_outbox_sent(entry_id: int, tg_message_id: int) -> None:
-    conn = await get_conn()
-    async with conn:
+    async with get_conn() as conn:
         await conn.execute(
             "UPDATE telegram_outbox SET sent=1, tg_message_id=?, sent_at=? WHERE id=?",
             (tg_message_id, datetime.utcnow().isoformat(), entry_id),
@@ -217,8 +209,7 @@ async def mark_outbox_sent(entry_id: int, tg_message_id: int) -> None:
 
 
 async def increment_outbox_attempt(entry_id: int, error: str) -> None:
-    conn = await get_conn()
-    async with conn:
+    async with get_conn() as conn:
         await conn.execute(
             "UPDATE telegram_outbox SET attempts=attempts+1, last_error=? WHERE id=?",
             (error, entry_id),
@@ -235,8 +226,7 @@ async def log_poll(
     error: Optional[str] = None,
     duration_ms: Optional[int] = None,
 ) -> None:
-    conn = await get_conn()
-    async with conn:
+    async with get_conn() as conn:
         await conn.execute(
             """INSERT INTO feed_poll_log
                (source_id, polled_at, items_found, items_new, error, duration_ms)
@@ -256,8 +246,7 @@ async def log_poll(
 # ── metrics ────────────────────────────────────────────────────────────────
 
 async def record_metric(name: str, value: float, tags: Optional[dict] = None) -> None:
-    conn = await get_conn()
-    async with conn:
+    async with get_conn() as conn:
         await conn.execute(
             "INSERT INTO pipeline_metrics (ts, metric_name, metric_value, tags) VALUES (?,?,?,?)",
             (
@@ -271,8 +260,7 @@ async def record_metric(name: str, value: float, tags: Optional[dict] = None) ->
 
 
 async def get_daily_stats(channel_id: str) -> dict:
-    conn = await get_conn()
-    async with conn:
+    async with get_conn() as conn:
         today = datetime.utcnow().date().isoformat()
         async with conn.execute(
             """SELECT
