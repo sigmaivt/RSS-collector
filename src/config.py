@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     # Telegram
     tg_bot_token: str
     tg_admin_chat_id: str
+    tg_proactive_chat_id: str = ""
 
     # Per-channel chat IDs
     tg_chat_ai_coding: Optional[str] = None
@@ -56,6 +57,13 @@ class Settings(BaseSettings):
     health_check_interval_minutes: int = 5
     alert_cooldown_minutes: int = 30
     digest_hour: int = 21
+
+    # Proactive reports
+    proactive_enabled: bool = True
+    proactive_digest_hour: int = 9
+    proactive_min_items_24h: int = 10
+    proactive_temperature: float = 0.3
+    proactive_max_tokens: int = 700
 
     # Database
     db_path: str = "./data/pipeline.db"

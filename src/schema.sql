@@ -110,3 +110,23 @@ CREATE TABLE IF NOT EXISTS feed_poll_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_poll_source ON feed_poll_log(source_id, polled_at);
+
+-- Proactive reports
+CREATE TABLE IF NOT EXISTS proactive_reports (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id      TEXT NOT NULL,
+    report_type     TEXT NOT NULL,        -- 'daily'
+    report_date     TEXT NOT NULL,        -- YYYY-MM-DD
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    sent_at         TIMESTAMP,
+    status          TEXT NOT NULL,        -- 'created' | 'sent' | 'failed' | 'skipped'
+    error_message   TEXT,
+    skipped_reason  TEXT,
+
+    UNIQUE(channel_id, report_type, report_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_proactive_reports_channel
+    ON proactive_reports(channel_id, report_type, report_date);
+CREATE INDEX IF NOT EXISTS idx_proactive_reports_created
+    ON proactive_reports(created_at);

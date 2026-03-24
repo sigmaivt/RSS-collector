@@ -331,6 +331,120 @@ async def get_daily_stats(channel_id: str) -> dict:
     return dict(row) if row else {}
 
 
+# -- proactive reports ---------------------------------------------------------
+
+_PROACTIVE_INCLUDED_STATES = (
+    JobState.VALIDATED.value,
+    JobState.SUMMARIZING.value,
+    JobState.READY_TO_SEND.value,
+    JobState.OUTBOX_PENDING.value,
+    JobState.SENT.value,
+    JobState.SEND_FAILED.value,
+)
+
+
+async def get_validated_items_since(
+    channel_id: str,
+    hours: int = 24,
+    limit: int = 200,
+) -> list[dict]:
+    since = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    placeholders = ",".join(["?"] * len(_PROACTIVE_INCLUDED_STATES))
+    query = f"""
+        SELECT
+            i.item_id,
+            i.source_id,
+            i.title,
+            i.link,
+            i.clean_text,
+            cj.summary,
+            cj.updated_at
+        FROM channel_jobs cj
+        JOIN items i ON i.item_id = cj.item_id
+        WHERE cj.channel_id = ?
+          AND cj.updated_at >= ?
+          AND cj.state IN ({placeholders})
+        ORDER BY cj.updated_at DESC
+        LIMIT ?
+    """
+    params: list = [channel_id, since, *_PROACTIVE_INCLUDED_STATES, limit]
+    async with get_conn() as conn:
+        async with conn.execute(query, params) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def check_proactive_report_exists(
+    channel_id: str,
+    report_type: str,
+    report_date: str,
+) -> bool:
+    async with get_conn() as conn:
+        async with conn.execute(
+            """SELECT 1 FROM proactive_reports
+               WHERE channel_id=? AND report_type=? AND report_date=?
+               LIMIT 1""",
+            (channel_id, report_type, report_date),
+        ) as cur:
+            row = await cur.fetchone()
+    return row is not None
+
+
+async def save_proactive_report(
+    channel_id: str,
+    report_type: str,
+    report_date: str,
+    status: str = "created",
+) -> int:
+    async with get_conn() as conn:
+        await conn.execute(
+            """INSERT OR IGNORE INTO proactive_reports
+               (channel_id, report_type, report_date, status, created_at)
+               VALUES (?,?,?,?,?)""",
+            (
+                channel_id,
+                report_type,
+                report_date,
+                status,
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        async with conn.execute(
+            """SELECT id FROM proactive_reports
+               WHERE channel_id=? AND report_type=? AND report_date=?
+               LIMIT 1""",
+            (channel_id, report_type, report_date),
+        ) as cur:
+            row = await cur.fetchone()
+        await conn.commit()
+    return int(row["id"])
+
+
+async def update_proactive_report_status(
+    report_id: int,
+    status: str,
+    error_message: Optional[str] = None,
+    skipped_reason: Optional[str] = None,
+    mark_sent: bool = False,
+) -> None:
+    sent_at = datetime.utcnow().isoformat() if mark_sent else None
+    async with get_conn() as conn:
+        await conn.execute(
+            """UPDATE proactive_reports
+               SET status=?, sent_at=COALESCE(?, sent_at),
+                   error_message=?, skipped_reason=?
+               WHERE id=?""",
+            (
+                status,
+                sent_at,
+                error_message,
+                skipped_reason,
+                report_id,
+            ),
+        )
+        await conn.commit()
+
+
 # ── helpers ────────────────────────────────────────────────────────────────
 
 def _job_from_row(row: dict) -> ChannelJob:

@@ -19,6 +19,7 @@ import db
 from alert_manager import AlertManager
 from classifier import Classifier
 from config import Settings, get_settings, load_channels
+from content_processor import ContentProcessor
 from feed_poller import poll_all_sources
 from health_monitor import HealthMonitor
 from models import ChannelConfig, JobState
@@ -94,6 +95,7 @@ async def main() -> None:
     classifier = Classifier(settings, pm)
     summarizer = Summarizer(settings, pm)
     alert_mgr = AlertManager(sender, settings.tg_admin_chat_id, settings.alert_cooldown_minutes)
+    processor = ContentProcessor(settings, pm, sender, alert_mgr)
     health_mon = HealthMonitor(settings, enabled, alert_mgr, sender)
     channel_last_run: dict[str, datetime] = {}
 
@@ -132,6 +134,16 @@ async def main() -> None:
         trigger=CronTrigger(hour=settings.digest_hour, minute=0),
         id="digest",
     )
+
+    if settings.proactive_enabled:
+        scheduler.add_job(
+            processor.run_daily_reports,
+            trigger=CronTrigger(hour=settings.proactive_digest_hour, minute=0),
+            args=[enabled],
+            id="proactive_daily",
+            max_instances=1,
+            coalesce=True,
+        )
 
     scheduler.start()
     log.info("scheduler_started", interval_min=settings.poll_interval_minutes)
