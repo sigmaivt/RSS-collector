@@ -42,7 +42,7 @@ class ContentProcessor:
         self._dataset_text_chars = 160
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
-    async def _call_llm(self, system_prompt: str, text: str) -> str:
+    async def _call_local_llm(self, system_prompt: str, text: str) -> str:
         url = f"{self._settings.lm_studio_url}/chat/completions"
         payload = {
             "model": self._settings.lm_studio_model,
@@ -70,7 +70,105 @@ class ContentProcessor:
             content = data["choices"][0]["message"]["content"]
             return self._sanitize_model_output(content)
 
+    def _openrouter_available(self) -> bool:
+        return bool(
+            getattr(self._settings, "openrouter_enabled", False)
+            and getattr(self._settings, "openrouter_api_key", None)
+        )
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=6))
+    async def _call_openrouter_llm(self, system_prompt: str, text: str) -> str:
+        if not self._openrouter_available():
+            raise RuntimeError("openrouter_not_configured")
+
+        base_url = self._settings.openrouter_base_url.rstrip("/")
+        url = f"{base_url}/chat/completions"
+        payload = {
+            "model": self._settings.openrouter_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Верни только финальный ответ без рассуждений.\n"
+                        + system_prompt
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+            "temperature": self._settings.proactive_temperature,
+            "max_tokens": min(self._settings.proactive_max_tokens, 500),
+        }
+        headers = {
+            "Authorization": f"Bearer {self._settings.openrouter_api_key}",
+            "Content-Type": "application/json",
+        }
+        if self._settings.openrouter_site_url:
+            headers["HTTP-Referer"] = self._settings.openrouter_site_url
+        if self._settings.openrouter_app_name:
+            headers["X-Title"] = self._settings.openrouter_app_name
+
+        timeout = int(getattr(self._settings, "openrouter_timeout_sec", 120))
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            content = self._extract_message_content(data)
+            return self._sanitize_model_output(content)
+
+    def _extract_message_content(self, data: dict) -> str:
+        choices = data.get("choices") or []
+        if not choices:
+            return ""
+        msg = choices[0].get("message") or {}
+        content = msg.get("content", "")
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for chunk in content:
+                if isinstance(chunk, str):
+                    parts.append(chunk)
+                elif isinstance(chunk, dict):
+                    text = chunk.get("text") or chunk.get("content") or ""
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "\n".join(p for p in parts if p).strip()
+        return str(content)
+
+    def _is_empty_or_null_output(self, text: str) -> bool:
+        value = (text or "").strip().lower()
+        return value in {"", "none", "null", "n/a", "нет данных"}
+
+    async def _call_llm(self, system_prompt: str, text: str) -> str:
+        try:
+            return await self._call_local_llm(system_prompt, text)
+        except Exception as exc:
+            if not self._openrouter_available():
+                raise
+            log.warning("proactive_local_llm_failed_fallback_openrouter", error=str(exc))
+            return await self._call_openrouter_llm(system_prompt, text)
+
+    async def _repair_with_openrouter(
+        self, system_prompt: str, text: str, reason: str
+    ) -> str | None:
+        if not self._openrouter_available():
+            return None
+        try:
+            repaired = await self._call_openrouter_llm(system_prompt, text)
+            if self._looks_like_prompt_echo_v2(repaired):
+                log.warning("proactive_openrouter_low_quality", reason=reason)
+                return None
+            log.info("proactive_openrouter_used", reason=reason)
+            return repaired
+        except Exception as exc:
+            log.warning("proactive_openrouter_failed", reason=reason, error=str(exc))
+            return None
+
     def _sanitize_model_output(self, content: str) -> str:
+        if not isinstance(content, str):
+            content = str(content)
         cleaned = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
         cleaned = cleaned.replace("```markdown", "").replace("```", "").strip()
 
@@ -224,7 +322,23 @@ class ContentProcessor:
         except Exception:
             log.warning("proactive_analysis_fallback_on_error")
             return self._fallback_analysis_v2(dataset)
+        if self._is_empty_or_null_output(result):
+            repaired = await self._repair_with_openrouter(
+                analyzer_prompt,
+                input_text,
+                reason="analysis_empty_or_null",
+            )
+            if repaired and not self._is_empty_or_null_output(repaired):
+                return repaired
+            return self._fallback_analysis_v2(dataset)
         if self._looks_like_prompt_echo_v2(result):
+            repaired = await self._repair_with_openrouter(
+                analyzer_prompt,
+                input_text,
+                reason="analysis_low_quality",
+            )
+            if repaired:
+                return repaired
             log.warning("proactive_analysis_low_quality_fallback")
             return self._fallback_analysis_v2(dataset)
         return result
@@ -243,7 +357,23 @@ class ContentProcessor:
         except Exception:
             log.warning("proactive_reco_fallback_on_error", channel=channel_id)
             return self._fallback_recommendations_v2(channel_id, dataset)
+        if self._is_empty_or_null_output(result):
+            repaired = await self._repair_with_openrouter(
+                recommender_prompt,
+                user_text,
+                reason=f"recommendations_empty_or_null_{channel_id}",
+            )
+            if repaired and not self._is_empty_or_null_output(repaired):
+                return repaired
+            return self._fallback_recommendations_v2(channel_id, dataset)
         if self._looks_like_prompt_echo_v2(result):
+            repaired = await self._repair_with_openrouter(
+                recommender_prompt,
+                user_text,
+                reason=f"recommendations_low_quality_{channel_id}",
+            )
+            if repaired:
+                return repaired
             log.warning("proactive_reco_low_quality_fallback", channel=channel_id)
             return self._fallback_recommendations_v2(channel_id, dataset)
         return result
@@ -263,12 +393,24 @@ class ContentProcessor:
             if self._looks_like_prompt_echo_v2(twitter) or self._looks_like_prompt_echo_v2(
                 linkedin
             ):
+                repaired_twitter = await self._repair_with_openrouter(
+                    twitter_prompt,
+                    base_text,
+                    reason=f"creative_twitter_low_quality_{channel_id}",
+                )
+                repaired_linkedin = await self._repair_with_openrouter(
+                    linkedin_prompt,
+                    base_text,
+                    reason=f"creative_linkedin_low_quality_{channel_id}",
+                )
+                if repaired_twitter and repaired_linkedin:
+                    return {"twitter": repaired_twitter, "linkedin": repaired_linkedin}
                 log.warning("proactive_posts_low_quality_fallback", channel=channel_id)
-                return self._fallback_posts_v2(dataset)
+                return self._fallback_posts_v2(channel_id, dataset)
             return {"twitter": twitter, "linkedin": linkedin}
         except Exception:
             log.warning("proactive_posts_fallback_on_error", channel=channel_id)
-            return self._fallback_posts_v2(dataset)
+            return self._fallback_posts_v2(channel_id, dataset)
 
     def _looks_like_prompt_echo_v2(self, text: str) -> bool:
         low = text.lower()
@@ -322,6 +464,31 @@ class ContentProcessor:
         groups.sort(key=lambda x: x[1], reverse=True)
         return groups[:5]
 
+    def _channel_profile_v2(self, channel_id: str) -> dict[str, str]:
+        if channel_id == "ai_coding":
+            return {
+                "study": "agentic coding workflow и инструменты разработчика",
+                "deepen": "качество кода, CI, безопасный rollout AI-фич",
+                "skill": "архитектура dev-пайплайнов с LLM в контуре",
+                "risk": "внедрение без тестов/наблюдаемости",
+                "tag": "#AICoding",
+            }
+        if channel_id == "ai_models":
+            return {
+                "study": "оценка моделей: качество, latency, стоимость",
+                "deepen": "архитектуры reasoning/multimodal и бенчмарки",
+                "skill": "эксперименты и валидация гипотез по моделям",
+                "risk": "выбор модели по хайпу без метрик",
+                "tag": "#AIModels",
+            }
+        return {
+            "study": "прикладные AI-сценарии для enterprise/ERP/MES",
+            "deepen": "интеграция в бизнес-процессы и данные",
+            "skill": "продуктовая аналитика ценности AI-функций",
+            "risk": "неучтенные ограничения процессов и данных",
+            "tag": "#ERPMES",
+        }
+
     def _fallback_analysis_v2(self, dataset: list[dict]) -> str:
         groups = self._extract_topic_groups_v2(dataset)
         sources = Counter((item.get("source_id") or "unknown") for item in dataset).most_common(3)
@@ -354,47 +521,60 @@ class ContentProcessor:
 
     def _fallback_recommendations_v2(self, channel_id: str, dataset: list[dict]) -> str:
         groups = self._extract_topic_groups_v2(dataset)
+        profile = self._channel_profile_v2(channel_id)
         top = [topic for topic, _, _ in groups[:3]]
         while len(top) < 3:
             top.append("AI-инженерия")
+        examples = []
+        for _, _, ex in groups:
+            examples.extend(ex)
+        ex1 = examples[0] if len(examples) > 0 else "без яркого примера"
+        ex2 = examples[1] if len(examples) > 1 else "без второго примера"
         return (
             "Что изучить прямо сейчас:\n"
-            f"1) Практика по теме «{top[0]}» на реальных задачах.\n"
-            f"2) Быстрые эксперименты по теме «{top[1]}» с замером эффекта.\n"
+            f"1) {profile['study']}: начните с кейса «{ex1}».\n"
+            f"2) Быстрые эксперименты по теме «{top[1]}» с замером эффекта на примере «{ex2}».\n"
             f"3) Чек-лист внедрения по теме «{top[2]}» (качество, стоимость, риски).\n\n"
             "Что углублять в ближайший месяц:\n"
-            "1) Наблюдаемость: latency, качество, доля успешных прогонов.\n"
+            f"1) {profile['deepen']}.\n"
             "2) Архитектура fallback: где локальная модель, где внешняя.\n"
             "3) Процесс валидации: критерии полезности для аудитории.\n\n"
             "Какие навыки развивать:\n"
-            "1) Проектирование AI-сервисов под ограничения контекста и ресурсов.\n"
+            f"1) {profile['skill']}.\n"
             "2) Prompt engineering + пост-валидация результата.\n"
             "3) Приоритизация задач по impact/effort.\n\n"
             "Риски и чего избегать:\n"
             "1) Выводы без проверки по нескольким источникам.\n"
             "2) Слишком длинные промпты и избыточная параллельность на локальной LLM.\n"
-            f"3) Потеря контекста канала ({channel_id}) при выборе тем."
+            f"3) {profile['risk']} для канала ({channel_id})."
         )
 
-    def _fallback_posts_v2(self, dataset: list[dict]) -> dict[str, str]:
+    def _fallback_posts_v2(self, channel_id: str, dataset: list[dict]) -> dict[str, str]:
         groups = self._extract_topic_groups_v2(dataset)
+        profile = self._channel_profile_v2(channel_id)
         top = [topic for topic, _, _ in groups[:3]]
         while len(top) < 3:
             top.append("AI-инженерия")
+        examples = []
+        for _, _, ex in groups:
+            examples.extend(ex)
+        ex1 = examples[0] if len(examples) > 0 else "последний дайджест"
+        ex2 = examples[1] if len(examples) > 1 else "второй кейс из ленты"
 
         twitter = (
-            f"1) Тема дня: «{top[0]}». Побеждают команды с измеримым эффектом, а не просто демо. #AI #Engineering\n"
-            f"2) По теме «{top[1]}» важны latency/стоимость и понятный fallback-план. #MLOps #LLM\n"
-            f"3) «{top[2]}» лучше внедрять короткими итерациями: гипотеза -> пилот -> решение. #DevTools #Product"
+            f"1) {profile['tag']} Тема дня: «{top[0]}» на примере «{ex1}». В приоритете измеримый эффект, не демо. #AI #Engineering\n"
+            f"2) По теме «{top[1]}» на кейсе «{ex2}» критичны latency/стоимость и понятный fallback-план. #MLOps #LLM\n"
+            f"3) Для {profile['tag']} «{top[2]}» лучше внедрять короткими итерациями: гипотеза -> пилот -> решение. #DevTools #Product"
         )
         linkedin = (
             "Пост 1\n"
-            f"Заголовок: Как превратить тренд «{top[0]}» в рабочий результат.\n"
-            "Сильные команды не спорят о хайпе, а проверяют гипотезы на конкретных кейсах.\n"
+            f"Заголовок: Как каналу {channel_id} превратить тренд «{top[0]}» в рабочий результат.\n"
+            f"Опорный кейс из ленты: «{ex1}».\n"
             "В AI-проектах ценность создается процессом: критерии качества, мониторинг, управление рисками.\n"
             "Практический вывод: запускать маленький пилот и масштабировать только после измеримого эффекта.\n\n"
             "Пост 2\n"
-            f"Заголовок: Как отбирать сигналы по темам «{top[1]}» и «{top[2]}».\n"
+            f"Заголовок: Как отбирать сигналы по темам «{top[1]}» и «{top[2]}» в {channel_id}.\n"
+            f"Второй опорный кейс: «{ex2}».\n"
             "В решение должны попадать только идеи, которые подтверждаются разными источниками и применимы к вашей среде.\n"
             "Рабочая рамка: impact, стоимость внедрения, устойчивость эксплуатации.\n"
             "Практический вывод: вести недельный backlog гипотез и закрывать цикл от идеи до решения."

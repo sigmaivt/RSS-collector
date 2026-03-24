@@ -26,8 +26,16 @@ class Settings(BaseSettings):
 
     # LM Studio
     lm_studio_url: str = "http://localhost:1234/v1"
-    lm_studio_model: str = "lfm2-2.6b-exp"
+    lm_studio_model: str = "qwen/qwen3.5-9b"
     llm_semaphore: int = 2
+    # OpenRouter backup LLM for proactive generation
+    openrouter_enabled: bool = False
+    openrouter_api_key: Optional[str] = None
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = "z-ai/glm-4.5-air:free"
+    openrouter_timeout_sec: int = 120
+    openrouter_site_url: Optional[str] = None
+    openrouter_app_name: str = "RSS Collector"
 
     # RSSHub
     rsshub_url: str = "http://localhost:1200"
