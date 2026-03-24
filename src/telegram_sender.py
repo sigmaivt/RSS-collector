@@ -84,10 +84,18 @@ class TelegramSender:
         async with httpx.AsyncClient() as client:
             for entry in entries:
                 if entry.attempts >= max_retries:
+                    error = f"max retries reached ({entry.attempts})"
                     log.error(
                         "outbox_max_retries",
                         item_id=entry.item_id,
                         channel=entry.channel_id,
+                    )
+                    await db.mark_outbox_failed(entry.id, error)
+                    await db.update_job_state_by_item_channel(
+                        entry.item_id,
+                        entry.channel_id,
+                        JobState.SEND_FAILED,
+                        "telegram send retries exhausted",
                     )
                     continue
                 try:
@@ -95,6 +103,11 @@ class TelegramSender:
                         entry.chat_id, entry.message_text, client
                     )
                     await db.mark_outbox_sent(entry.id, msg_id)
+                    await db.update_job_state_by_item_channel(
+                        entry.item_id,
+                        entry.channel_id,
+                        JobState.SENT,
+                    )
                     log.info(
                         "tg_sent",
                         item_id=entry.item_id,
@@ -109,7 +122,24 @@ class TelegramSender:
                         item_id=entry.item_id,
                         error=str(exc),
                     )
-                    await db.increment_outbox_attempt(entry.id, str(exc))
+                    attempts = await db.increment_outbox_attempt(entry.id, str(exc))
+                    if attempts >= max_retries:
+                        await db.mark_outbox_failed(
+                            entry.id, f"max retries reached: {exc}"
+                        )
+                        await db.update_job_state_by_item_channel(
+                            entry.item_id,
+                            entry.channel_id,
+                            JobState.SEND_FAILED,
+                            "telegram send retries exhausted",
+                        )
+                    else:
+                        await db.update_job_state_by_item_channel(
+                            entry.item_id,
+                            entry.channel_id,
+                            JobState.OUTBOX_PENDING,
+                            str(exc),
+                        )
         return sent
 
     async def send_text(self, chat_id: str, text: str) -> None:

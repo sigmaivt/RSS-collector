@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import structlog
@@ -34,6 +35,7 @@ async def pipeline_tick(
     summarizer: Summarizer,
     sender: TelegramSender,
     settings: Settings,
+    channel_last_run: dict[str, datetime],
 ) -> None:
     """One full pipeline cycle: poll → classify → summarize → send."""
     log.info("pipeline_tick_start")
@@ -41,10 +43,18 @@ async def pipeline_tick(
     # 1. Poll all RSS sources
     await poll_all_sources(channels, max_text_length=settings.max_text_length)
 
-    # 2. Classify + summarize for each channel
+    # 2. Classify + summarize for each channel (respect per-channel schedule)
+    now = datetime.utcnow()
     for ch in channels:
         if not ch.enabled:
             continue
+
+        last_run = channel_last_run.get(ch.id)
+        if last_run is not None:
+            elapsed_sec = (now - last_run).total_seconds()
+            if elapsed_sec < ch.schedule_minutes * 60:
+                continue
+
         await classifier.run_batch(ch)
         await summarizer.run_batch(ch)
 
@@ -54,8 +64,9 @@ async def pipeline_tick(
         )
         for job in jobs:
             await sender.enqueue_job(job, ch)
-            job.state = JobState.SENT
+            job.state = JobState.OUTBOX_PENDING
             await db.update_job(job)
+        channel_last_run[ch.id] = now
 
     # 3. Flush outbox
     sent = await sender.flush_outbox()
@@ -84,6 +95,7 @@ async def main() -> None:
     summarizer = Summarizer(settings, pm)
     alert_mgr = AlertManager(sender, settings.tg_admin_chat_id, settings.alert_cooldown_minutes)
     health_mon = HealthMonitor(settings, enabled, alert_mgr, sender)
+    channel_last_run: dict[str, datetime] = {}
 
     scheduler = AsyncIOScheduler()
 
@@ -91,7 +103,7 @@ async def main() -> None:
     scheduler.add_job(
         pipeline_tick,
         trigger=IntervalTrigger(minutes=settings.poll_interval_minutes),
-        args=[enabled, classifier, summarizer, sender, settings],
+        args=[enabled, classifier, summarizer, sender, settings, channel_last_run],
         id="pipeline",
         max_instances=1,
         coalesce=True,
@@ -125,7 +137,9 @@ async def main() -> None:
     log.info("scheduler_started", interval_min=settings.poll_interval_minutes)
 
     # Run immediately on startup
-    await pipeline_tick(enabled, classifier, summarizer, sender, settings)
+    await pipeline_tick(
+        enabled, classifier, summarizer, sender, settings, channel_last_run
+    )
 
     try:
         await asyncio.Event().wait()

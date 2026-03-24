@@ -106,27 +106,43 @@ async def acquire_jobs(
         stale_threshold = (
             datetime.utcnow() - timedelta(minutes=lease_minutes)
         ).isoformat()
-        async with conn.execute(
-            """SELECT * FROM channel_jobs
-               WHERE channel_id = ? AND state = ?
-               AND (leased_at IS NULL OR leased_at < ?)
-               ORDER BY created_at
-               LIMIT ?""",
-            (channel_id, state.value, stale_threshold, limit),
-        ) as cur:
-            rows = await cur.fetchall()
+        leased_rows: list[aiosqlite.Row] = []
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            async with conn.execute(
+                """SELECT id FROM channel_jobs
+                   WHERE channel_id = ? AND state = ?
+                   AND (leased_at IS NULL OR leased_at < ?)
+                   ORDER BY created_at
+                   LIMIT ?""",
+                (channel_id, state.value, stale_threshold, limit),
+            ) as cur:
+                rows = await cur.fetchall()
 
-        now = datetime.utcnow().isoformat()
-        ids = [row["id"] for row in rows]
-        if ids:
-            placeholders = ",".join("?" * len(ids))
-            await conn.execute(
-                f"UPDATE channel_jobs SET leased_at = ? WHERE id IN ({placeholders})",
-                [now, *ids],
-            )
+            ids = [row["id"] for row in rows]
+            if ids:
+                now = datetime.utcnow().isoformat()
+                placeholders = ",".join("?" * len(ids))
+                await conn.execute(
+                    f"""UPDATE channel_jobs
+                        SET leased_at = ?, updated_at = ?
+                        WHERE id IN ({placeholders})
+                          AND (leased_at IS NULL OR leased_at < ?)""",
+                    [now, now, *ids, stale_threshold],
+                )
+                async with conn.execute(
+                    f"""SELECT * FROM channel_jobs
+                        WHERE id IN ({placeholders})
+                        ORDER BY created_at""",
+                    ids,
+                ) as cur:
+                    leased_rows = await cur.fetchall()
             await conn.commit()
+        except Exception:
+            await conn.rollback()
+            raise
 
-    return [_job_from_row(dict(r)) for r in rows]
+    return [_job_from_row(dict(r)) for r in leased_rows]
 
 
 async def update_job(job: ChannelJob) -> None:
@@ -145,6 +161,28 @@ async def update_job(job: ChannelJob) -> None:
                 job.leased_at.isoformat() if job.leased_at else None,
                 datetime.utcnow().isoformat(),
                 job.id,
+            ),
+        )
+        await conn.commit()
+
+
+async def update_job_state_by_item_channel(
+    item_id: str,
+    channel_id: str,
+    state: JobState,
+    last_error: str | None = None,
+) -> None:
+    async with get_conn() as conn:
+        await conn.execute(
+            """UPDATE channel_jobs
+               SET state=?, last_error=?, leased_at=NULL, updated_at=?
+               WHERE item_id=? AND channel_id=?""",
+            (
+                state.value,
+                last_error,
+                datetime.utcnow().isoformat(),
+                item_id,
+                channel_id,
             ),
         )
         await conn.commit()
@@ -208,11 +246,28 @@ async def mark_outbox_sent(entry_id: int, tg_message_id: int) -> None:
         await conn.commit()
 
 
-async def increment_outbox_attempt(entry_id: int, error: str) -> None:
+async def increment_outbox_attempt(entry_id: int, error: str) -> int:
     async with get_conn() as conn:
         await conn.execute(
             "UPDATE telegram_outbox SET attempts=attempts+1, last_error=? WHERE id=?",
             (error, entry_id),
+        )
+        async with conn.execute(
+            "SELECT attempts FROM telegram_outbox WHERE id=?",
+            (entry_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        await conn.commit()
+        return int(row["attempts"]) if row else 0
+
+
+async def mark_outbox_failed(entry_id: int, error: str) -> None:
+    async with get_conn() as conn:
+        await conn.execute(
+            """UPDATE telegram_outbox
+               SET sent=1, last_error=?, sent_at=?
+               WHERE id=?""",
+            (error, datetime.utcnow().isoformat(), entry_id),
         )
         await conn.commit()
 
