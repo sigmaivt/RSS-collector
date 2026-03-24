@@ -35,6 +35,7 @@ async def pipeline_tick(
     classifier: Classifier,
     summarizer: Summarizer,
     sender: TelegramSender,
+    processor: ContentProcessor,
     settings: Settings,
     channel_last_run: dict[str, datetime],
 ) -> None:
@@ -68,6 +69,13 @@ async def pipeline_tick(
             job.state = JobState.OUTBOX_PENDING
             await db.update_job(job)
         channel_last_run[ch.id] = now
+
+        if getattr(settings, "proactive_enabled", False):
+            try:
+                if await processor.should_trigger_proactive(ch.id):
+                    await processor.run_proactive_report(ch, report_type="triggered")
+            except Exception as exc:
+                log.error("proactive_trigger_check_failed", channel=ch.id, error=str(exc))
 
     # 3. Flush outbox
     sent = await sender.flush_outbox()
@@ -105,7 +113,7 @@ async def main() -> None:
     scheduler.add_job(
         pipeline_tick,
         trigger=IntervalTrigger(minutes=settings.poll_interval_minutes),
-        args=[enabled, classifier, summarizer, sender, settings, channel_last_run],
+        args=[enabled, classifier, summarizer, sender, processor, settings, channel_last_run],
         id="pipeline",
         max_instances=1,
         coalesce=True,
@@ -150,7 +158,7 @@ async def main() -> None:
 
     # Run immediately on startup
     await pipeline_tick(
-        enabled, classifier, summarizer, sender, settings, channel_last_run
+        enabled, classifier, summarizer, sender, processor, settings, channel_last_run
     )
 
     try:

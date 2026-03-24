@@ -32,6 +32,7 @@ class ContentProcessorTests(unittest.IsolatedAsyncioTestCase):
             proactive_enabled=True,
             proactive_digest_hour=9,
             proactive_min_items_24h=2,
+            proactive_trigger_threshold=2,
             proactive_temperature=0.3,
             proactive_max_tokens=700,
             tg_proactive_chat_id="-100123456",
@@ -106,6 +107,10 @@ class ContentProcessorTests(unittest.IsolatedAsyncioTestCase):
             self.processor,
             "provide_recommendations",
             new=AsyncMock(return_value="recommendations"),
+        ), patch.object(
+            self.processor,
+            "generate_posts",
+            new=AsyncMock(return_value={"twitter": "t", "linkedin": "l"}),
         ):
             await self.processor.run_daily_report(self.channel)
             await self.processor.run_daily_report(self.channel)
@@ -151,6 +156,10 @@ class ContentProcessorTests(unittest.IsolatedAsyncioTestCase):
             self.processor,
             "provide_recommendations",
             new=AsyncMock(return_value="recommendations"),
+        ), patch.object(
+            self.processor,
+            "generate_posts",
+            new=AsyncMock(return_value={"twitter": "t", "linkedin": "l"}),
         ):
             await self.processor.run_daily_reports([self.channel])
 
@@ -175,12 +184,52 @@ class ContentProcessorTests(unittest.IsolatedAsyncioTestCase):
             self.processor,
             "provide_recommendations",
             new=AsyncMock(return_value="recommendations"),
+        ), patch.object(
+            self.processor,
+            "generate_posts",
+            new=AsyncMock(return_value={"twitter": "t", "linkedin": "l"}),
         ):
             await self.processor.run_daily_reports([self.channel])
 
         rows = await self._proactive_rows()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["status"], "failed")
+
+    async def test_should_trigger_proactive_threshold_and_dedup(self) -> None:
+        await self._seed_validated_item(1)
+        await self._seed_validated_item(2)
+
+        should = await self.processor.should_trigger_proactive(self.channel.id)
+        self.assertTrue(should)
+
+        await db.save_proactive_report(
+            channel_id=self.channel.id,
+            report_type="triggered",
+            report_date="2099-01-01",
+            status="sent",
+        )
+        # emulate a recent sent report in last 24h
+        async with db.get_conn() as conn:
+            await conn.execute(
+                """UPDATE proactive_reports
+                   SET created_at=datetime('now'), report_date=date('now')
+                   WHERE channel_id=? AND report_type='triggered'""",
+                (self.channel.id,),
+            )
+            await conn.commit()
+
+        should = await self.processor.should_trigger_proactive(self.channel.id)
+        self.assertFalse(should)
+
+    async def test_generate_posts_returns_both_channels(self) -> None:
+        with patch.object(
+            self.processor,
+            "_call_llm",
+            new=AsyncMock(side_effect=["tweet1\ntweet2\ntweet3", "linkedin1\n\nlinkedin2"]),
+        ):
+            posts = await self.processor.generate_posts("analysis text", self.channel.id)
+        self.assertIn("twitter", posts)
+        self.assertIn("linkedin", posts)
 
 
 if __name__ == "__main__":

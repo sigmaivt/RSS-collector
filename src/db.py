@@ -391,6 +391,26 @@ async def check_proactive_report_exists(
     return row is not None
 
 
+async def check_recent_proactive_report(
+    channel_id: str,
+    report_type: str,
+    hours: int = 24,
+) -> bool:
+    since = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    async with get_conn() as conn:
+        async with conn.execute(
+            """SELECT 1 FROM proactive_reports
+               WHERE channel_id=?
+                 AND report_type=?
+                 AND status IN ('created', 'sent')
+                 AND created_at >= ?
+               LIMIT 1""",
+            (channel_id, report_type, since),
+        ) as cur:
+            row = await cur.fetchone()
+    return row is not None
+
+
 async def save_proactive_report(
     channel_id: str,
     report_type: str,
@@ -460,6 +480,23 @@ async def update_proactive_report_status(
             ),
         )
         await conn.commit()
+
+
+async def count_validated_items_since(channel_id: str, hours: int = 24) -> int:
+    since = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    placeholders = ",".join(["?"] * len(_PROACTIVE_INCLUDED_STATES))
+    query = f"""
+        SELECT COUNT(*) AS c
+        FROM channel_jobs
+        WHERE channel_id=?
+          AND updated_at >= ?
+          AND state IN ({placeholders})
+    """
+    params: list = [channel_id, since, *_PROACTIVE_INCLUDED_STATES]
+    async with get_conn() as conn:
+        async with conn.execute(query, params) as cur:
+            row = await cur.fetchone()
+    return int(row["c"]) if row else 0
 
 
 # ── helpers ────────────────────────────────────────────────────────────────

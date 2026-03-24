@@ -37,6 +37,14 @@ class _DummySender:
         return 0
 
 
+class _DummyProcessor:
+    async def should_trigger_proactive(self, channel_id: str) -> bool:
+        return False
+
+    async def run_proactive_report(self, channel, report_type: str = "triggered") -> None:
+        return None
+
+
 class CriticalFixesTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -113,6 +121,7 @@ class CriticalFixesTests(unittest.IsolatedAsyncioTestCase):
         classifier = _DummyWorker()
         summarizer = _DummyWorker()
         sender = _DummySender()
+        processor = _DummyProcessor()
         settings = SimpleNamespace(max_text_length=5000, job_lease_minutes=10)
         channel_last_run = {channel.id: datetime.utcnow()}
 
@@ -122,6 +131,7 @@ class CriticalFixesTests(unittest.IsolatedAsyncioTestCase):
                 classifier,
                 summarizer,
                 sender,
+                processor,
                 settings,
                 channel_last_run,
             )
@@ -134,6 +144,7 @@ class CriticalFixesTests(unittest.IsolatedAsyncioTestCase):
                 classifier,
                 summarizer,
                 sender,
+                processor,
                 settings,
                 channel_last_run,
             )

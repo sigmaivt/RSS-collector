@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     proactive_enabled: bool = True
     proactive_digest_hour: int = 9
     proactive_min_items_24h: int = 10
+    proactive_trigger_threshold: int = 10
     proactive_temperature: float = 0.3
     proactive_max_tokens: int = 700
 

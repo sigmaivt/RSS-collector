@@ -8,6 +8,7 @@ import re
 import time
 from collections import Counter
 from datetime import datetime
+from typing import Literal
 
 import httpx
 import structlog
@@ -166,6 +167,28 @@ class ContentProcessor:
             f"3) Игнорирование контекста канала ({channel_id})."
         )
 
+    def _fallback_posts(self, analysis: str) -> dict[str, str]:
+        twitter = (
+            "1) AI-кодинг смещается к agentic workflow: важна не модель сама по себе, "
+            "а воспроизводимый пайплайн вокруг нее. #AI #DevTools\n"
+            "2) Главный тренд недели: практичность и стоимость AI-решений важнее хайпа. "
+            "#MLOps #Engineering\n"
+            "3) Для команды сейчас критично: наблюдаемость, тестирование и безопасный rollout "
+            "AI-фич. #Platform #DevSecOps"
+        )
+        linkedin = (
+            "Пост 1\n"
+            "Заголовок: AI-инструменты разработки переходят из экспериментов в production.\n"
+            "Ключевая идея: ценность дает не единичный инструмент, а целостная инженерная система "
+            "с метриками, наблюдаемостью и контролем рисков.\n"
+            "Практический вывод: строить повторяемый workflow от ingestion данных до релизов.\n\n"
+            "Пост 2\n"
+            "Заголовок: Как команде не потеряться в потоке AI-новостей.\n"
+            "Ключевая идея: фильтруйте сигналы по применимости, стоимости и поддерживаемости.\n"
+            "Практический вывод: раз в неделю фиксировать 2-3 гипотезы и проверять их на данных."
+        )
+        return {"twitter": twitter, "linkedin": linkedin}
+
     async def build_dataset(self, channel_id: str, hours: int = 24) -> list[dict]:
         return await db.get_validated_items_since(channel_id, hours=hours, limit=25)
 
@@ -207,6 +230,24 @@ class ContentProcessor:
             return self._fallback_recommendations(channel_id)
         return result
 
+    async def generate_posts(self, analysis: str, channel_id: str) -> dict[str, str]:
+        twitter_prompt = self._pm.get("generator_twitter_ru.txt")
+        linkedin_prompt = self._pm.get("generator_linkedin_ru.txt")
+        base_text = f"Канал: {channel_id}\n\nАнализ:\n{analysis}"
+
+        try:
+            async with self._sem:
+                twitter = await self._call_llm(twitter_prompt, base_text)
+            async with self._sem:
+                linkedin = await self._call_llm(linkedin_prompt, base_text)
+            if self._looks_like_prompt_echo(twitter) or self._looks_like_prompt_echo(linkedin):
+                log.warning("proactive_posts_low_quality_fallback", channel=channel_id)
+                return self._fallback_posts(analysis)
+            return {"twitter": twitter, "linkedin": linkedin}
+        except Exception:
+            log.warning("proactive_posts_fallback_on_error", channel=channel_id)
+            return self._fallback_posts(analysis)
+
     def _fit_sections(self, sections: list[tuple[str, str]], max_chars: int) -> str:
         parts: list[str] = []
         for title, content in sections:
@@ -234,19 +275,32 @@ class ContentProcessor:
         analysis: str,
         recommendations: str,
         item_count: int,
+        posts: dict[str, str] | None = None,
+        report_type: str = "daily",
     ) -> str:
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        report_label = "Daily" if report_type == "daily" else "Triggered"
         sections = [
-            ("<b>🤖 Proactive Report</b>", ""),
+            (f"<b>🤖 Proactive Report ({report_label})</b>", ""),
             (f"<b>Канал:</b> {html.escape(channel.name)}", ""),
             (f"<b>Материалов за 24ч:</b> {item_count}", ""),
             ("<b>📊 Анализ трендов</b>", html.escape(analysis)),
+        ]
+        if posts:
+            sections.append(("<b>📝 Идеи постов (X/LinkedIn)</b>", html.escape(
+                "X/Twitter:\n" + posts.get("twitter", "") + "\n\nLinkedIn:\n" + posts.get("linkedin", "")
+            )))
+        sections.extend([
             ("<b>💡 Рекомендации</b>", html.escape(recommendations)),
             (f"<i>Сформировано: {timestamp}</i>", ""),
-        ]
+        ])
         return self._fit_sections(sections, self._max_tg_message_chars)
 
-    async def run_daily_report(self, channel: ChannelConfig) -> None:
+    async def run_proactive_report(
+        self,
+        channel: ChannelConfig,
+        report_type: Literal["daily", "triggered"] = "daily",
+    ) -> None:
         if not self._settings.proactive_enabled:
             return
         if not self._settings.tg_proactive_chat_id:
@@ -255,10 +309,13 @@ class ContentProcessor:
 
         started_at = time.monotonic()
         report_date = datetime.utcnow().date().isoformat()
-        report_type = "daily"
         tags = {"channel": channel.id, "type": report_type}
 
-        if await db.check_proactive_report_exists(channel.id, report_type, report_date):
+        if report_type == "daily":
+            exists = await db.check_proactive_report_exists(channel.id, report_type, report_date)
+        else:
+            exists = await db.check_recent_proactive_report(channel.id, report_type, hours=24)
+        if exists:
             log.info("proactive_skip_duplicate", channel=channel.id, report_date=report_date)
             return
 
@@ -288,12 +345,15 @@ class ContentProcessor:
 
         try:
             analysis = await self.analyze_trends(dataset)
+            posts = await self.generate_posts(analysis, channel.id)
             recommendations = await self.provide_recommendations(analysis, channel.id)
             report = self.compose_markdown_report(
                 channel=channel,
                 analysis=analysis,
                 recommendations=recommendations,
                 item_count=len(dataset),
+                posts=posts,
+                report_type=report_type,
             )
             await self._sender.send_text(self._settings.tg_proactive_chat_id, report)
             await db.update_proactive_report_status(
@@ -326,12 +386,33 @@ class ContentProcessor:
             await db.record_metric("proactive_run_duration_ms", float(duration_ms), tags)
 
     async def run_daily_reports(self, channels: list[ChannelConfig]) -> None:
+        await self.run_proactive_reports(channels, report_type="daily")
+
+    async def run_daily_report(self, channel: ChannelConfig) -> None:
+        await self.run_proactive_report(channel, report_type="daily")
+
+    async def should_trigger_proactive(self, channel_id: str) -> bool:
+        count = await db.count_validated_items_since(channel_id, hours=24)
+        if count < self._settings.proactive_trigger_threshold:
+            return False
+        already_sent = await db.check_recent_proactive_report(
+            channel_id=channel_id,
+            report_type="triggered",
+            hours=24,
+        )
+        return not already_sent
+
+    async def run_proactive_reports(
+        self,
+        channels: list[ChannelConfig],
+        report_type: Literal["daily", "triggered"] = "daily",
+    ) -> None:
         if not self._settings.proactive_enabled:
             return
         for channel in channels:
             if not channel.enabled:
                 continue
             try:
-                await self.run_daily_report(channel)
+                await self.run_proactive_report(channel, report_type=report_type)
             except Exception as exc:
                 log.error("proactive_channel_unhandled_error", channel=channel.id, error=str(exc))
