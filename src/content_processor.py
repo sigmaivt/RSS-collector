@@ -6,6 +6,7 @@ import asyncio
 import html
 import re
 import time
+from collections import Counter
 from datetime import datetime
 
 import httpx
@@ -42,7 +43,15 @@ class ContentProcessor:
         payload = {
             "model": self._settings.lm_studio_model,
             "messages": [
-                {"role": "system", "content": system_prompt},
+                {
+                    "role": "system",
+                    "content": (
+                        "/no_think\n"
+                        + system_prompt
+                        + "\n\nВерни только финальный ответ. "
+                        + "Не показывай рассуждения, chain-of-thought, Thinking Process."
+                    ),
+                },
                 {"role": "user", "content": text},
             ],
             "temperature": self._settings.proactive_temperature,
@@ -54,10 +63,111 @@ class ContentProcessor:
             resp.raise_for_status()
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
-            return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            return self._sanitize_model_output(content)
+
+    def _sanitize_model_output(self, content: str) -> str:
+        cleaned = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+        cleaned = cleaned.replace("```markdown", "").replace("```", "").strip()
+
+        banned_markers = [
+            "thinking process",
+            "analyze the request",
+            "**role:**",
+            "**input:**",
+            "**task:**",
+            "**requirements:**",
+            "output language",
+            "format:",
+        ]
+
+        kept_lines: list[str] = []
+        for raw_line in cleaned.splitlines():
+            line = raw_line.strip()
+            low = line.lower()
+            if any(marker in low for marker in banned_markers):
+                continue
+            if re.match(r"^\d+\.\s*\*\*.*(request|requirements|analysis).*", low):
+                continue
+            kept_lines.append(raw_line)
+
+        result = "\n".join(kept_lines).strip()
+        result = re.sub(r"\n{3,}", "\n\n", result)
+        return result or cleaned
+
+    def _looks_like_prompt_echo(self, text: str) -> bool:
+        low = text.lower()
+        markers = [
+            "analyze the request",
+            "analyze the input data",
+            "thinking process",
+            "identify trends",
+            "requirements",
+            "structure:",
+            "output language",
+            "**role:**",
+            "**input:**",
+            "**task:**",
+        ]
+        hits = sum(1 for m in markers if m in low)
+        english_chars = len(re.findall(r"[A-Za-z]", text))
+        cyrillic_chars = len(re.findall(r"[А-Яа-яЁё]", text))
+        mostly_english = english_chars > (cyrillic_chars * 2 + 120)
+        return hits >= 2 or mostly_english
+
+    def _fallback_analysis(self, dataset: list[dict]) -> str:
+        source_counts = Counter((item.get("source_id") or "unknown") for item in dataset)
+        words: Counter[str] = Counter()
+        for item in dataset:
+            title = (item.get("title") or "").lower()
+            for w in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{3,}", title):
+                if w in {"with", "from", "that", "this", "open", "source"}:
+                    continue
+                words[w] += 1
+
+        top_sources = source_counts.most_common(3)
+        top_words = words.most_common(6)
+        lines = ["1) Главные темы в потоке:"]
+        if top_words:
+            lines.append("- Часто встречающиеся темы: " + ", ".join(w for w, _ in top_words))
+        if top_sources:
+            lines.append(
+                "- Наиболее активные источники: "
+                + ", ".join(f"{src} ({cnt})" for src, cnt in top_sources)
+            )
+        lines.append(
+            "2) Почему это важно: поток фокусируется на AI-инструментах разработки, "
+            "инфраструктуре и практическом применении моделей."
+        )
+        lines.append(
+            "3) Ключевые выводы:\n"
+            "- Растёт доля практических инструментов для разработчиков.\n"
+            "- Ускоряется выпуск OSS/AI-решений для продакшена.\n"
+            "- Важно фильтровать сигналы по повторяемости темы в разных источниках."
+        )
+        return "\n".join(lines)
+
+    def _fallback_recommendations(self, channel_id: str) -> str:
+        return (
+            "Что изучить прямо сейчас:\n"
+            "1) Практика с agentic coding инструментами и workflow.\n"
+            "2) Оценка LLM-инфраструктуры: стоимость, latency, качество.\n"
+            "3) DevSecOps для AI-проектов (сканирование, supply-chain).\n\n"
+            "Что углублять в ближайший месяц:\n"
+            "1) Оркестрация пайплайнов и наблюдаемость.\n"
+            "2) Архитектуры мультимодальных/reasoning-моделей.\n"
+            "3) Продуктовые метрики ценности AI-функций.\n\n"
+            "Какие навыки развивать:\n"
+            "1) Системный дизайн AI-сервисов.\n"
+            "2) Промпт-инжиниринг с валидацией результата.\n"
+            "3) Быстрая проверка гипотез на данных.\n\n"
+            "Риски и чего избегать:\n"
+            "1) Публикация выводов без верификации источников.\n"
+            "2) Слепое доверие одному источнику/одной модели.\n"
+            f"3) Игнорирование контекста канала ({channel_id})."
+        )
 
     async def build_dataset(self, channel_id: str, hours: int = 24) -> list[dict]:
-        return await db.get_validated_items_since(channel_id, hours=hours)
+        return await db.get_validated_items_since(channel_id, hours=hours, limit=25)
 
     def _format_dataset_prompt(self, dataset: list[dict]) -> str:
         lines: list[str] = []
@@ -67,8 +177,8 @@ class ContentProcessor:
             link = (item.get("link") or "").strip()
             body = item.get("summary") or item.get("clean_text") or ""
             body = re.sub(r"\s+", " ", str(body)).strip()
-            if len(body) > 700:
-                body = body[:700].rsplit(" ", 1)[0] + "..."
+            if len(body) > 320:
+                body = body[:320].rsplit(" ", 1)[0] + "..."
             lines.append(
                 f"[{idx}] TITLE: {title}\nSOURCE: {source}\nLINK: {link}\nTEXT: {body}"
             )
@@ -78,7 +188,11 @@ class ContentProcessor:
         analyzer_prompt = self._pm.get("analyzer_ru.txt")
         input_text = self._format_dataset_prompt(dataset)
         async with self._sem:
-            return await self._call_llm(analyzer_prompt, input_text)
+            result = await self._call_llm(analyzer_prompt, input_text)
+        if self._looks_like_prompt_echo(result):
+            log.warning("proactive_analysis_low_quality_fallback")
+            return self._fallback_analysis(dataset)
+        return result
 
     async def provide_recommendations(self, analysis: str, channel_id: str) -> str:
         recommender_prompt = self._pm.get("recommender_ru.txt")
@@ -87,7 +201,11 @@ class ContentProcessor:
             f"На основе этого анализа сформируй рекомендации.\n\n{analysis}"
         )
         async with self._sem:
-            return await self._call_llm(recommender_prompt, user_text)
+            result = await self._call_llm(recommender_prompt, user_text)
+        if self._looks_like_prompt_echo(result):
+            log.warning("proactive_reco_low_quality_fallback", channel=channel_id)
+            return self._fallback_recommendations(channel_id)
+        return result
 
     def _fit_sections(self, sections: list[tuple[str, str]], max_chars: int) -> str:
         parts: list[str] = []

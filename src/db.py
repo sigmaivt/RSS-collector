@@ -383,6 +383,7 @@ async def check_proactive_report_exists(
         async with conn.execute(
             """SELECT 1 FROM proactive_reports
                WHERE channel_id=? AND report_type=? AND report_date=?
+                 AND status IN ('created', 'sent')
                LIMIT 1""",
             (channel_id, report_type, report_date),
         ) as cur:
@@ -397,16 +398,32 @@ async def save_proactive_report(
     status: str = "created",
 ) -> int:
     async with get_conn() as conn:
+        now = datetime.utcnow().isoformat()
         await conn.execute(
             """INSERT OR IGNORE INTO proactive_reports
-               (channel_id, report_type, report_date, status, created_at)
-               VALUES (?,?,?,?,?)""",
+               (channel_id, report_type, report_date, status, created_at, error_message, skipped_reason, sent_at)
+               VALUES (?,?,?,?,?,?,?,NULL)""",
             (
                 channel_id,
                 report_type,
                 report_date,
                 status,
-                datetime.utcnow().isoformat(),
+                now,
+                None,
+                None,
+            ),
+        )
+        await conn.execute(
+            """UPDATE proactive_reports
+               SET status=?, created_at=?, error_message=NULL, skipped_reason=NULL, sent_at=NULL
+               WHERE channel_id=? AND report_type=? AND report_date=?
+                 AND status IN ('failed', 'skipped')""",
+            (
+                status,
+                now,
+                channel_id,
+                report_type,
+                report_date,
             ),
         )
         async with conn.execute(
