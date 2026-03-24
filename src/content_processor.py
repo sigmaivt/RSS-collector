@@ -37,6 +37,9 @@ class ContentProcessor:
         self._sem = asyncio.Semaphore(settings.llm_semaphore)
         self._failure_streak: dict[str, int] = {}
         self._max_tg_message_chars = 3800
+        # Keep proactive prompts compact for local 4k-context models.
+        self._dataset_limit = 12
+        self._dataset_text_chars = 160
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     async def _call_llm(self, system_prompt: str, text: str) -> str:
@@ -56,7 +59,8 @@ class ContentProcessor:
                 {"role": "user", "content": text},
             ],
             "temperature": self._settings.proactive_temperature,
-            "max_tokens": self._settings.proactive_max_tokens,
+            # Guard against LM Studio context overflows.
+            "max_tokens": min(self._settings.proactive_max_tokens, 320),
             "chat_template_kwargs": {"enable_thinking": False},
         }
         async with httpx.AsyncClient(timeout=180) as client:
@@ -190,7 +194,11 @@ class ContentProcessor:
         return {"twitter": twitter, "linkedin": linkedin}
 
     async def build_dataset(self, channel_id: str, hours: int = 24) -> list[dict]:
-        return await db.get_validated_items_since(channel_id, hours=hours, limit=25)
+        return await db.get_validated_items_since(
+            channel_id,
+            hours=hours,
+            limit=self._dataset_limit,
+        )
 
     def _format_dataset_prompt(self, dataset: list[dict]) -> str:
         lines: list[str] = []
@@ -200,8 +208,8 @@ class ContentProcessor:
             link = (item.get("link") or "").strip()
             body = item.get("summary") or item.get("clean_text") or ""
             body = re.sub(r"\s+", " ", str(body)).strip()
-            if len(body) > 320:
-                body = body[:320].rsplit(" ", 1)[0] + "..."
+            if len(body) > self._dataset_text_chars:
+                body = body[: self._dataset_text_chars].rsplit(" ", 1)[0] + "..."
             lines.append(
                 f"[{idx}] TITLE: {title}\nSOURCE: {source}\nLINK: {link}\nTEXT: {body}"
             )
@@ -210,27 +218,39 @@ class ContentProcessor:
     async def analyze_trends(self, dataset: list[dict]) -> str:
         analyzer_prompt = self._pm.get("analyzer_ru.txt")
         input_text = self._format_dataset_prompt(dataset)
-        async with self._sem:
-            result = await self._call_llm(analyzer_prompt, input_text)
-        if self._looks_like_prompt_echo(result):
+        try:
+            async with self._sem:
+                result = await self._call_llm(analyzer_prompt, input_text)
+        except Exception:
+            log.warning("proactive_analysis_fallback_on_error")
+            return self._fallback_analysis_v2(dataset)
+        if self._looks_like_prompt_echo_v2(result):
             log.warning("proactive_analysis_low_quality_fallback")
-            return self._fallback_analysis(dataset)
+            return self._fallback_analysis_v2(dataset)
         return result
 
-    async def provide_recommendations(self, analysis: str, channel_id: str) -> str:
+    async def provide_recommendations(
+        self, analysis: str, channel_id: str, dataset: list[dict]
+    ) -> str:
         recommender_prompt = self._pm.get("recommender_ru.txt")
         user_text = (
             f"Канал: {channel_id}\n"
             f"На основе этого анализа сформируй рекомендации.\n\n{analysis}"
         )
-        async with self._sem:
-            result = await self._call_llm(recommender_prompt, user_text)
-        if self._looks_like_prompt_echo(result):
+        try:
+            async with self._sem:
+                result = await self._call_llm(recommender_prompt, user_text)
+        except Exception:
+            log.warning("proactive_reco_fallback_on_error", channel=channel_id)
+            return self._fallback_recommendations_v2(channel_id, dataset)
+        if self._looks_like_prompt_echo_v2(result):
             log.warning("proactive_reco_low_quality_fallback", channel=channel_id)
-            return self._fallback_recommendations(channel_id)
+            return self._fallback_recommendations_v2(channel_id, dataset)
         return result
 
-    async def generate_posts(self, analysis: str, channel_id: str) -> dict[str, str]:
+    async def generate_posts(
+        self, analysis: str, channel_id: str, dataset: list[dict]
+    ) -> dict[str, str]:
         twitter_prompt = self._pm.get("generator_twitter_ru.txt")
         linkedin_prompt = self._pm.get("generator_linkedin_ru.txt")
         base_text = f"Канал: {channel_id}\n\nАнализ:\n{analysis}"
@@ -240,13 +260,146 @@ class ContentProcessor:
                 twitter = await self._call_llm(twitter_prompt, base_text)
             async with self._sem:
                 linkedin = await self._call_llm(linkedin_prompt, base_text)
-            if self._looks_like_prompt_echo(twitter) or self._looks_like_prompt_echo(linkedin):
+            if self._looks_like_prompt_echo_v2(twitter) or self._looks_like_prompt_echo_v2(
+                linkedin
+            ):
                 log.warning("proactive_posts_low_quality_fallback", channel=channel_id)
-                return self._fallback_posts(analysis)
+                return self._fallback_posts_v2(dataset)
             return {"twitter": twitter, "linkedin": linkedin}
         except Exception:
             log.warning("proactive_posts_fallback_on_error", channel=channel_id)
-            return self._fallback_posts(analysis)
+            return self._fallback_posts_v2(dataset)
+
+    def _looks_like_prompt_echo_v2(self, text: str) -> bool:
+        low = text.lower()
+        markers = [
+            "thinking process",
+            "analyze the request",
+            "analyze the input",
+            "identify 3-5 trends",
+            "requirements",
+            "structure:",
+            "**role:**",
+            "**input:**",
+            "**task:**",
+        ]
+        hits = sum(1 for marker in markers if marker in low)
+        english_chars = len(re.findall(r"[A-Za-z]", text))
+        cyrillic_chars = len(re.findall(r"[\u0400-\u04FF]", text))
+        mostly_english = english_chars > (cyrillic_chars * 2 + 80)
+        return hits >= 2 or mostly_english
+
+    def _extract_topic_groups_v2(self, dataset: list[dict]) -> list[tuple[str, int, list[str]]]:
+        topic_keywords: list[tuple[str, set[str]]] = [
+            ("LLM и модели", {"llm", "model", "reasoning", "open-weight", "multimodal"}),
+            ("AI-инфраструктура", {"nvidia", "cloud", "gpu", "inference", "latency"}),
+            ("Инструменты разработки", {"github", "tool", "dev", "coder", "workflow", "git"}),
+            ("Безопасность и DevSecOps", {"security", "vuln", "scanner", "supply", "injection"}),
+            ("OSS и платформы", {"open source", "oss", "release", "linux", "database", "filesystem"}),
+            ("Медиа и мультимодальность", {"video", "audio", "tts", "vision", "diffusion"}),
+            ("Агенты и автоматизация", {"agent", "agentic", "autonomous", "orchestration"}),
+            ("Право и этика", {"lawsuit", "ethics", "regulation", "legal", "policy"}),
+        ]
+
+        buckets: dict[str, list[str]] = {}
+        for item in dataset:
+            title = str(item.get("title") or "").strip()
+            if not title:
+                continue
+            low = title.lower()
+            matched = False
+            for topic, keywords in topic_keywords:
+                if any(k in low for k in keywords):
+                    buckets.setdefault(topic, []).append(title)
+                    matched = True
+                    break
+            if not matched:
+                buckets.setdefault("Прочее", []).append(title)
+
+        groups: list[tuple[str, int, list[str]]] = []
+        for topic, titles in buckets.items():
+            groups.append((topic, len(titles), titles[:2]))
+        groups.sort(key=lambda x: x[1], reverse=True)
+        return groups[:5]
+
+    def _fallback_analysis_v2(self, dataset: list[dict]) -> str:
+        groups = self._extract_topic_groups_v2(dataset)
+        sources = Counter((item.get("source_id") or "unknown") for item in dataset).most_common(3)
+
+        lines = ["1) Главные темы за 24ч:"]
+        if groups:
+            for idx, (topic, count, examples) in enumerate(groups, start=1):
+                example_text = "; ".join(examples) if examples else "без примеров"
+                lines.append(
+                    f"- [{idx}] {topic}: подтверждений ~{count}. Примеры: {example_text}."
+                )
+        else:
+            lines.append("- Недостаточно данных для уверенной тематической группировки.")
+        if sources:
+            lines.append(
+                "- Наиболее активные источники: "
+                + ", ".join(f"{source} ({count})" for source, count in sources)
+            )
+        lines.append(
+            "2) Почему это важно: поток смещается в сторону прикладных AI-решений, "
+            "где важны эксплуатация, цена и воспроизводимость результата."
+        )
+        lines.append(
+            "3) Ключевые выводы:\n"
+            "- Приоритет у практических инструментов и сценариев внедрения.\n"
+            "- Устойчивость пайплайна важнее разовых демо.\n"
+            "- Для решения нужны сигналы, подтвержденные несколькими источниками."
+        )
+        return "\n".join(lines)
+
+    def _fallback_recommendations_v2(self, channel_id: str, dataset: list[dict]) -> str:
+        groups = self._extract_topic_groups_v2(dataset)
+        top = [topic for topic, _, _ in groups[:3]]
+        while len(top) < 3:
+            top.append("AI-инженерия")
+        return (
+            "Что изучить прямо сейчас:\n"
+            f"1) Практика по теме «{top[0]}» на реальных задачах.\n"
+            f"2) Быстрые эксперименты по теме «{top[1]}» с замером эффекта.\n"
+            f"3) Чек-лист внедрения по теме «{top[2]}» (качество, стоимость, риски).\n\n"
+            "Что углублять в ближайший месяц:\n"
+            "1) Наблюдаемость: latency, качество, доля успешных прогонов.\n"
+            "2) Архитектура fallback: где локальная модель, где внешняя.\n"
+            "3) Процесс валидации: критерии полезности для аудитории.\n\n"
+            "Какие навыки развивать:\n"
+            "1) Проектирование AI-сервисов под ограничения контекста и ресурсов.\n"
+            "2) Prompt engineering + пост-валидация результата.\n"
+            "3) Приоритизация задач по impact/effort.\n\n"
+            "Риски и чего избегать:\n"
+            "1) Выводы без проверки по нескольким источникам.\n"
+            "2) Слишком длинные промпты и избыточная параллельность на локальной LLM.\n"
+            f"3) Потеря контекста канала ({channel_id}) при выборе тем."
+        )
+
+    def _fallback_posts_v2(self, dataset: list[dict]) -> dict[str, str]:
+        groups = self._extract_topic_groups_v2(dataset)
+        top = [topic for topic, _, _ in groups[:3]]
+        while len(top) < 3:
+            top.append("AI-инженерия")
+
+        twitter = (
+            f"1) Тема дня: «{top[0]}». Побеждают команды с измеримым эффектом, а не просто демо. #AI #Engineering\n"
+            f"2) По теме «{top[1]}» важны latency/стоимость и понятный fallback-план. #MLOps #LLM\n"
+            f"3) «{top[2]}» лучше внедрять короткими итерациями: гипотеза -> пилот -> решение. #DevTools #Product"
+        )
+        linkedin = (
+            "Пост 1\n"
+            f"Заголовок: Как превратить тренд «{top[0]}» в рабочий результат.\n"
+            "Сильные команды не спорят о хайпе, а проверяют гипотезы на конкретных кейсах.\n"
+            "В AI-проектах ценность создается процессом: критерии качества, мониторинг, управление рисками.\n"
+            "Практический вывод: запускать маленький пилот и масштабировать только после измеримого эффекта.\n\n"
+            "Пост 2\n"
+            f"Заголовок: Как отбирать сигналы по темам «{top[1]}» и «{top[2]}».\n"
+            "В решение должны попадать только идеи, которые подтверждаются разными источниками и применимы к вашей среде.\n"
+            "Рабочая рамка: impact, стоимость внедрения, устойчивость эксплуатации.\n"
+            "Практический вывод: вести недельный backlog гипотез и закрывать цикл от идеи до решения."
+        )
+        return {"twitter": twitter, "linkedin": linkedin}
 
     def _fit_sections(self, sections: list[tuple[str, str]], max_chars: int) -> str:
         parts: list[str] = []
@@ -275,7 +428,6 @@ class ContentProcessor:
         analysis: str,
         recommendations: str,
         item_count: int,
-        posts: dict[str, str] | None = None,
         report_type: str = "daily",
     ) -> str:
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
@@ -286,14 +438,32 @@ class ContentProcessor:
             (f"<b>Материалов за 24ч:</b> {item_count}", ""),
             ("<b>📊 Анализ трендов</b>", html.escape(analysis)),
         ]
-        if posts:
-            sections.append(("<b>📝 Идеи постов (X/LinkedIn)</b>", html.escape(
-                "X/Twitter:\n" + posts.get("twitter", "") + "\n\nLinkedIn:\n" + posts.get("linkedin", "")
-            )))
         sections.extend([
             ("<b>💡 Рекомендации</b>", html.escape(recommendations)),
             (f"<i>Сформировано: {timestamp}</i>", ""),
         ])
+        return self._fit_sections(sections, self._max_tg_message_chars)
+
+    def compose_creative_report(
+        self,
+        channel: ChannelConfig,
+        posts: dict[str, str],
+        report_type: str = "daily",
+    ) -> str:
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        report_label = "Daily" if report_type == "daily" else "Triggered"
+        creative = (
+            "X/Twitter:\n"
+            + posts.get("twitter", "")
+            + "\n\nLinkedIn:\n"
+            + posts.get("linkedin", "")
+        )
+        sections = [
+            (f"<b>📝 Creative Pack ({report_label})</b>", ""),
+            (f"<b>Канал:</b> {html.escape(channel.name)}", ""),
+            ("<b>Идеи постов</b>", html.escape(creative)),
+            (f"<i>Сформировано: {timestamp}</i>", ""),
+        ]
         return self._fit_sections(sections, self._max_tg_message_chars)
 
     async def run_proactive_report(
@@ -345,17 +515,28 @@ class ContentProcessor:
 
         try:
             analysis = await self.analyze_trends(dataset)
-            posts = await self.generate_posts(analysis, channel.id)
-            recommendations = await self.provide_recommendations(analysis, channel.id)
+            posts = await self.generate_posts(analysis, channel.id, dataset)
+            recommendations = await self.provide_recommendations(
+                analysis, channel.id, dataset
+            )
             report = self.compose_markdown_report(
                 channel=channel,
                 analysis=analysis,
                 recommendations=recommendations,
                 item_count=len(dataset),
-                posts=posts,
                 report_type=report_type,
             )
             await self._sender.send_text(self._settings.tg_proactive_chat_id, report)
+            creative_chat_id = self._settings.tg_proactive_creative_chat_id
+            if creative_chat_id:
+                creative_report = self.compose_creative_report(
+                    channel=channel,
+                    posts=posts,
+                    report_type=report_type,
+                )
+                await self._sender.send_text(creative_chat_id, creative_report)
+            else:
+                log.info("proactive_creative_chat_not_set", channel=channel.id)
             await db.update_proactive_report_status(
                 report_id,
                 status="sent",

@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     tg_bot_token: str
     tg_admin_chat_id: str
     tg_proactive_chat_id: str = ""
+    tg_proactive_creative_chat_id: str = ""
 
     # Per-channel chat IDs
     tg_chat_ai_coding: Optional[str] = None

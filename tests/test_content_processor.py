@@ -36,6 +36,7 @@ class ContentProcessorTests(unittest.IsolatedAsyncioTestCase):
             proactive_temperature=0.3,
             proactive_max_tokens=700,
             tg_proactive_chat_id="-100123456",
+            tg_proactive_creative_chat_id="",
         )
         self.sender = SimpleNamespace(send_text=AsyncMock(return_value=None))
         self.alert_mgr = SimpleNamespace(alert=AsyncMock(return_value=None))
@@ -227,9 +228,33 @@ class ContentProcessorTests(unittest.IsolatedAsyncioTestCase):
             "_call_llm",
             new=AsyncMock(side_effect=["tweet1\ntweet2\ntweet3", "linkedin1\n\nlinkedin2"]),
         ):
-            posts = await self.processor.generate_posts("analysis text", self.channel.id)
+            posts = await self.processor.generate_posts("analysis text", self.channel.id, [])
         self.assertIn("twitter", posts)
         self.assertIn("linkedin", posts)
+
+    async def test_sends_creative_report_to_separate_chat_when_configured(self) -> None:
+        await self._seed_validated_item(1)
+        await self._seed_validated_item(2)
+        self.settings.tg_proactive_creative_chat_id = "-100999888777"
+
+        with patch.object(
+            self.processor, "analyze_trends", new=AsyncMock(return_value="analysis")
+        ), patch.object(
+            self.processor,
+            "provide_recommendations",
+            new=AsyncMock(return_value="recommendations"),
+        ), patch.object(
+            self.processor,
+            "generate_posts",
+            new=AsyncMock(return_value={"twitter": "tw", "linkedin": "li"}),
+        ):
+            await self.processor.run_daily_report(self.channel)
+
+        self.assertEqual(self.sender.send_text.await_count, 2)
+        args_1 = self.sender.send_text.await_args_list[0].args
+        args_2 = self.sender.send_text.await_args_list[1].args
+        self.assertEqual(args_1[0], self.settings.tg_proactive_chat_id)
+        self.assertEqual(args_2[0], self.settings.tg_proactive_creative_chat_id)
 
 
 if __name__ == "__main__":
